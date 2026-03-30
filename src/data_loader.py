@@ -1,22 +1,36 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
+from torch.utils.data import Dataset, DataLoader
 
-df = pd.read_csv("data/fer2013.csv")
+class FERDataset(Dataset):
+    def __init__(self, csv_file):
+        self.df = pd.read_csv(csv_file)
+    
+    def __len__(self):
+        return len(self.df)
+    
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        
+        label = int(row["emotion"])
 
-print(df.head())
-print(df.columns)
+        pixels = row["pixels"].split()
+        pixels = np.array(pixels, dtype=np.float32).reshape(48, 48)
 
-row = df.iloc[0]
+        img = torch.tensor(pixels).unsqueeze(0)
 
-label = row["emotion"]
-pixels = row["pixels"].split()
-pixels = np.array(pixels, dtype=np.float32)
-img = pixels.reshape(48, 48)
+        return img, label
 
-print("Label: ", label)
-print("Image shape: ", img.shape)
+if __name__ == "__main__":
+    dataset = FERDataset("data/fer2013.csv")
+    print("Dataset size: ", len(dataset))
 
-plt.imshow(img, cmap="gray")
-plt.title(f"Label: {label}")
-plt.show()
+    img, label = dataset[0]
+    print("Single sample: ", img.shape, label)
+
+    loader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+    images, labels = next(iter(loader))
+    print("Batch shape: ", images.shape, labels.shape)
