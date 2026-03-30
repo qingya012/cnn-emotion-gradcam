@@ -7,8 +7,9 @@ import torch.nn as nn
 import torch.optim as optim
 
 class FERDataset(Dataset):
-    def __init__(self, csv_file):
-        self.df = pd.read_csv(csv_file)
+    def __init__(self, csv_file, split="Training"):
+        df = pd.read_csv(csv_file)
+        self.df = df[df["Usage"] == split].reset_index(drop=True)
     
     def __len__(self):
         return len(self.df)
@@ -83,17 +84,22 @@ def evaluate(model, loader, criterion, device):
 
         average_loss = running_loss / len(loader)
         accuracy = correct / total
-        return average_loss, accuracy
+        return accuracy
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dataset = FERDataset("data/fer2013.csv")
-    loader = DataLoader(dataset, batch_size=64, shuffle=True)
+
+    train_dataset = FERDataset("data/fer2013.csv", split="Training")
+    val_dataset = FERDataset("data/fer2013.csv", split="PublicTest")
+
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True)
 
     model = SimpleCNN()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     for epoch in range(5):
-        train_loss = train_one_epoch(model, loader, optimizer, criterion, device)
-        print(f"Epoch {epoch+1}, Train Loss: {train_loss}")
+        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
+        val_accuracy = evaluate(model, val_loader, criterion, device)
+        print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
