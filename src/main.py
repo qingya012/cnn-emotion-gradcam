@@ -5,6 +5,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.optim as optim
+from sklearn.metrics import confusion_matrix
 
 class FERDataset(Dataset):
     def __init__(self, csv_file, split="Training"):
@@ -20,7 +21,7 @@ class FERDataset(Dataset):
         label = int(row["emotion"])
 
         pixels = row["pixels"].split()
-        pixels = np.array(pixels, dtype=np.float32).reshape(48, 48)
+        pixels = np.array(pixels, dtype=np.float32).reshape(48, 48) / 255.0
 
         img = torch.tensor(pixels).unsqueeze(0)
 
@@ -30,16 +31,27 @@ class SimpleCNN(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.conv = nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3)
-        self.relu = nn.ReLU()
-        self.flatten = nn.Flatten()
-        self.fc = nn.Linear(in_features=8*46*46, out_features=7)
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2), # 24x24
+
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2), # 12x12
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(in_features=32*12*12, out_features=128),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features=128, out_features=7),
+        )
 
     def forward(self, x):
-        x = self.conv(x)
-        x = self.relu(x)
-        x = self.flatten(x)
-        x = self.fc(x)
+        x = self.features(x)
+        x = self.classifier(x)
         return x
 
 def train_one_epoch(model, loader, optimizer, criterion, device):
@@ -84,7 +96,24 @@ def evaluate(model, loader, criterion, device):
 
         average_loss = running_loss / len(loader)
         accuracy = correct / total
-        return accuracy
+        return average_loss, accuracy
+
+def get_predictions(model, loader, device):
+    model.eval()
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device)
+            labels = labels.to(device)
+
+            outputs = model(images)
+            preds = torch.argmax(outputs, dim=1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    return all_preds, all_labels
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -99,7 +128,19 @@ if __name__ == "__main__":
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    for epoch in range(5):
+    best_val_accuracy = 0.0
+    for epoch in range(10):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-        val_accuracy = evaluate(model, val_loader, criterion, device)
-        print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
+        val_loss, val_accuracy = evaluate(model, val_loader, criterion, device)
+        y_pred, y_true = get_predictions(model, val_loader, device)
+
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            torch.save(model.state_dict(), "best_model.pth")
+
+        print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
+
+    print(f"Best Val Accuracy: {best_val_accuracy:.4f}")
+
+    cm = confusion_matrix(y_true, y_pred)
+    print(cm)
