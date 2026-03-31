@@ -8,6 +8,16 @@ import torch.optim as optim
 from sklearn.metrics import confusion_matrix
 
 class FERDataset(Dataset):
+    class_names = (
+        "Angry",
+        "Disgust",
+        "Fear",
+        "Happy",
+        "Sad",
+        "Surprise",
+        "Neutral",
+    )
+
     def __init__(self, csv_file, split="Training"):
         df = pd.read_csv(csv_file)
         self.df = df[df["Usage"] == split].reset_index(drop=True)
@@ -116,14 +126,16 @@ def get_predictions(model, loader, device):
     return all_preds, all_labels
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Use GPU if available
 
+    # Load data
     train_dataset = FERDataset("data/fer2013.csv", split="Training")
     val_dataset = FERDataset("data/fer2013.csv", split="PublicTest")
 
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True)
 
+    # Train model
     model = SimpleCNN()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
@@ -142,5 +154,25 @@ if __name__ == "__main__":
 
     print(f"Best Val Accuracy: {best_val_accuracy:.4f}")
 
-    cm = confusion_matrix(y_true, y_pred)
+    # Plot confusion matrix
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2, 3, 4, 5, 6])
     print(cm)
+
+    plt.figure(figsize=(10, 10))
+    plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
+    plt.title("Confusion Matrix")
+    plt.colorbar()
+
+    tick_marks = np.arange(len(FERDataset.class_names))
+    plt.xticks(tick_marks, FERDataset.class_names, rotation=45)
+    plt.yticks(tick_marks, FERDataset.class_names)
+
+    plt.xlabel("Predicted Label")
+    plt.ylabel("True Label")
+    
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            plt.text(j, i, format(cm[i, j], "d"), ha="center", va="center")
+
+    plt.tight_layout()
+    plt.show()
