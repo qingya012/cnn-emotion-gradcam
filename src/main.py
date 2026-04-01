@@ -148,31 +148,13 @@ if __name__ == "__main__":
 
         if val_accuracy > best_val_accuracy:
             best_val_accuracy = val_accuracy
+            best_y_true = y_true
+            best_y_pred = y_pred
             torch.save(model.state_dict(), "best_model.pth")
 
         print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
 
     print(f"Best Val Accuracy: {best_val_accuracy:.4f}")
 
-    # Plot confusion matrix
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2, 3, 4, 5, 6])
-    print(cm)
-
-    plt.figure(figsize=(10, 10))
-    plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
-    plt.title("Confusion Matrix")
-    plt.colorbar()
-
-    tick_marks = np.arange(len(FERDataset.class_names))
-    plt.xticks(tick_marks, FERDataset.class_names, rotation=45)
-    plt.yticks(tick_marks, FERDataset.class_names)
-
-    plt.xlabel("Predicted Label")
-    plt.ylabel("True Label")
-    
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            plt.text(j, i, format(cm[i, j], "d"), ha="center", va="center")
-
-    plt.tight_layout()
-    plt.show()
+    np.save("best_y_true.npy", np.array(best_y_true))
+    np.save("best_y_pred.npy", np.array(best_y_pred))
