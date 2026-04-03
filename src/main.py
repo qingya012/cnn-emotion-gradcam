@@ -141,10 +141,18 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     best_val_accuracy = 0.0
+    train_losses = []
+    val_losses = []
+    val_accuracies = []
+
     for epoch in range(10):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
         val_loss, val_accuracy = evaluate(model, val_loader, criterion, device)
         y_pred, y_true = get_predictions(model, val_loader, device)
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        val_accuracies.append(val_accuracy)
 
         if val_accuracy > best_val_accuracy:
             best_val_accuracy = val_accuracy
@@ -158,3 +166,6 @@ if __name__ == "__main__":
 
     np.save("best_y_true.npy", np.array(best_y_true))
     np.save("best_y_pred.npy", np.array(best_y_pred))
+    np.save("train_losses.npy", np.array(train_losses))
+    np.save("val_losses.npy", np.array(val_losses))
+    np.save("val_accuracies.npy", np.array(val_accuracies))
