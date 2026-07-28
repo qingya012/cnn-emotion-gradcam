@@ -42,21 +42,64 @@ class SimpleCNN(nn.Module):
         super().__init__()
 
         self.features = nn.Sequential(
+            # input: 48x48
             nn.Conv2d(in_channels=1, out_channels=16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2), # 24x24
+            nn.MaxPool2d(kernel_size=2),  # 24x24
 
             nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2), # 12x12
+            nn.MaxPool2d(kernel_size=2),  # 12x12
         )
 
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(in_features=32*12*12, out_features=128),
+            nn.Linear(in_features=32 * 12 * 12, out_features=128),
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=128, out_features=7),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+class VGGStyleCNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # VGG-style: 3 blocks of (Conv3x3 → ReLU → Conv3x3 → ReLU → MaxPool2x2)
+        self.features = nn.Sequential(
+            # Block 1: 48x48 → 24x24
+            nn.Conv2d(in_channels=1, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+
+            # Block 2: 24x24 → 12x12
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+
+            # Block 3: 12x12 → 6x6
+            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(in_features=256 * 6 * 6, out_features=512),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features=512, out_features=7),
         )
 
     def forward(self, x):
@@ -136,7 +179,7 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True)
 
     # Train model
-    model = SimpleCNN()
+    model = VGGStyleCNN()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
