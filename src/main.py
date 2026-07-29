@@ -1,11 +1,13 @@
+import argparse
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.metrics import confusion_matrix
+
 
 class FERDataset(Dataset):
     class_names = (
@@ -21,13 +23,13 @@ class FERDataset(Dataset):
     def __init__(self, csv_file, split="Training"):
         df = pd.read_csv(csv_file)
         self.df = df[df["Usage"] == split].reset_index(drop=True)
-    
+
     def __len__(self):
         return len(self.df)
-    
+
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        
+
         label = int(row["emotion"])
 
         pixels = row["pixels"].split()
@@ -36,6 +38,7 @@ class FERDataset(Dataset):
         img = torch.tensor(pixels).unsqueeze(0)
 
         return img, label
+
 
 class SimpleCNN(nn.Module):
     def __init__(self):
@@ -107,6 +110,90 @@ class VGGStyleCNN(nn.Module):
         x = self.classifier(x)
         return x
 
+
+# CLI name → architecture + Grad-CAM target (last Conv2d in features)
+MODELS = {
+    "simple": {
+        "class": SimpleCNN,
+        "gradcam_layer_index": 3,
+    },
+    "vgg": {
+        "class": VGGStyleCNN,
+        "gradcam_layer_index": 12,
+    },
+}
+
+
+def get_results_dir(model_name: str, root: str | Path = ".") -> Path:
+    if model_name not in MODELS:
+        raise ValueError(f"Unknown model {model_name!r}. Choose from: {list(MODELS)}")
+    return Path(root) / "results" / model_name
+
+
+def build_model(model_name: str) -> nn.Module:
+    if model_name not in MODELS:
+        raise ValueError(f"Unknown model {model_name!r}. Choose from: {list(MODELS)}")
+    return MODELS[model_name]["class"]()
+
+
+def get_gradcam_layer(model: nn.Module, model_name: str) -> nn.Module:
+    if model_name not in MODELS:
+        raise ValueError(f"Unknown model {model_name!r}. Choose from: {list(MODELS)}")
+    return model.features[MODELS[model_name]["gradcam_layer_index"]]
+
+
+def load_history(model_name: str, root: str | Path = "."):
+    results = get_results_dir(model_name, root)
+    required = ("train_losses.npy", "val_losses.npy", "val_accuracies.npy")
+    missing = [name for name in required if not (results / name).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing {missing} under {results}. Train with:\n"
+            f"  python src/main.py --model {model_name}"
+        )
+    return {
+        "train_losses": np.load(results / "train_losses.npy"),
+        "val_losses": np.load(results / "val_losses.npy"),
+        "val_accuracies": np.load(results / "val_accuracies.npy"),
+    }
+
+
+def load_predictions(model_name: str, root: str | Path = "."):
+    results = get_results_dir(model_name, root)
+    y_true_path = results / "best_y_true.npy"
+    y_pred_path = results / "best_y_pred.npy"
+    if not y_true_path.exists() or not y_pred_path.exists():
+        raise FileNotFoundError(
+            f"Missing prediction files under {results}. Train with:\n"
+            f"  python src/main.py --model {model_name}"
+        )
+    return np.load(y_true_path), np.load(y_pred_path)
+
+
+def get_device() -> torch.device:
+    """Prefer CUDA, then Apple Silicon MPS, then CPU."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def load_trained_model(model_name: str, device, root: str | Path = "."):
+    results = get_results_dir(model_name, root)
+    checkpoint = results / "best_model.pth"
+    if not checkpoint.exists():
+        raise FileNotFoundError(
+            f"{checkpoint} not found. Train with:\n"
+            f"  python src/main.py --model {model_name}"
+        )
+    model = build_model(model_name)
+    model.load_state_dict(torch.load(checkpoint, map_location=device))
+    model.to(device)
+    model.eval()
+    return model
+
+
 def train_one_epoch(model, loader, optimizer, criterion, device):
     model.train()
     running_loss = 0.0
@@ -126,6 +213,7 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
         running_loss += loss.item()
 
     return running_loss / len(loader)
+
 
 def evaluate(model, loader, criterion, device):
     model.eval()
@@ -151,6 +239,7 @@ def evaluate(model, loader, criterion, device):
         accuracy = correct / total
         return average_loss, accuracy
 
+
 def get_predictions(model, loader, device):
     model.eval()
     all_preds = []
@@ -168,27 +257,45 @@ def get_predictions(model, loader, device):
 
     return all_preds, all_labels
 
-if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Use GPU if available
 
-    # Load data
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train FER emotion CNN")
+    parser.add_argument(
+        "--model",
+        choices=list(MODELS),
+        default="simple",
+        help="Architecture to train (results saved under results/<model>/)",
+    )
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=0.001)
+    args = parser.parse_args()
+
+    device = get_device()
+    root = Path(".")
+    out_dir = get_results_dir(args.model, root)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     train_dataset = FERDataset("data/fer2013.csv", split="Training")
     val_dataset = FERDataset("data/fer2013.csv", split="PublicTest")
 
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
-    # Train model
-    model = VGGStyleCNN()
+    model = build_model(args.model).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     best_val_accuracy = 0.0
+    best_y_true = None
+    best_y_pred = None
     train_losses = []
     val_losses = []
     val_accuracies = []
 
-    for epoch in range(10):
+    print(f"Training model={args.model} on {device}; saving to {out_dir}/")
+
+    for epoch in range(args.epochs):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
         val_loss, val_accuracy = evaluate(model, val_loader, criterion, device)
         y_pred, y_true = get_predictions(model, val_loader, device)
@@ -201,14 +308,17 @@ if __name__ == "__main__":
             best_val_accuracy = val_accuracy
             best_y_true = y_true
             best_y_pred = y_pred
-            torch.save(model.state_dict(), "best_model.pth")
+            torch.save(model.state_dict(), out_dir / "best_model.pth")
 
-        print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
+        print(
+            f"Epoch {epoch + 1}, Train Loss: {train_loss:.4f}, "
+            f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
+        )
 
     print(f"Best Val Accuracy: {best_val_accuracy:.4f}")
 
-    np.save("best_y_true.npy", np.array(best_y_true))
-    np.save("best_y_pred.npy", np.array(best_y_pred))
-    np.save("train_losses.npy", np.array(train_losses))
-    np.save("val_losses.npy", np.array(val_losses))
-    np.save("val_accuracies.npy", np.array(val_accuracies))
+    np.save(out_dir / "best_y_true.npy", np.array(best_y_true))
+    np.save(out_dir / "best_y_pred.npy", np.array(best_y_pred))
+    np.save(out_dir / "train_losses.npy", np.array(train_losses))
+    np.save(out_dir / "val_losses.npy", np.array(val_losses))
+    np.save(out_dir / "val_accuracies.npy", np.array(val_accuracies))
