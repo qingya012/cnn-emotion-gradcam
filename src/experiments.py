@@ -9,7 +9,7 @@ Each experiment is identified by a filesystem-safe name and stored under
   metrics. Metrics that were never collected are represented by ``null``.
 * ``model.pth``: the best validation checkpoint.
 * ``best_y_true.npy`` and ``best_y_pred.npy``: labels and predictions from
-  the epoch that produced the best validation accuracy.
+  the epoch selected by the run's validation checkpoint criterion.
 """
 
 import json
@@ -114,7 +114,6 @@ def experiment_summary_records(root: str | Path = ".") -> list[dict]:
                 "Architecture": config.get("architecture"),
                 "Main Change": config.get("description"),
                 "Best Val Accuracy": history.get("best_validation_accuracy"),
-                "Test Accuracy": history.get("test_accuracy"),
                 "Epochs": config.get("epochs"),
             }
         )

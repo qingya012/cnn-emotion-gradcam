@@ -24,6 +24,10 @@ The command and its options mean:
   ``config.json`` and the notebook summary. It does not alter training.
 * ``--epochs``, ``--batch-size``, and ``--lr`` optionally override their
   defaults of 10, 64, and 0.001.
+* ``--augment`` enables the FER2013-inspired training-only augmentation
+  pipeline; validation preprocessing remains deterministic.
+* ``--early-stopping`` enables the V4 protocol: 30 maximum epochs, patience
+  5 on validation loss, and reloading the best validation-loss checkpoint.
 """
 
 import argparse
@@ -35,6 +39,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.optim as optim
+from torchvision import transforms
 
 from experiments import (
     CHECKPOINT_FILENAME,
@@ -49,6 +54,86 @@ from experiments import (
 )
 
 
+def build_training_transform(augmentation: bool = False):
+    """Build deterministic preprocessing plus optional training augmentation."""
+    operations = [transforms.ToPILImage()]
+    if augmentation:
+        operations.extend(
+            [
+                transforms.RandomApply(
+                    [transforms.RandomAffine(degrees=0, scale=(0.8, 1.2))],
+                    p=0.5,
+                ),
+                transforms.RandomApply(
+                    [transforms.RandomAffine(degrees=0, translate=(0.2, 0.2))],
+                    p=0.5,
+                ),
+                transforms.RandomApply(
+                    [transforms.RandomRotation(degrees=10)],
+                    p=0.5,
+                ),
+            ]
+        )
+    operations.append(transforms.ToTensor())
+    if augmentation:
+        # The paper supplies p=0.5; scale and ratio use torchvision defaults.
+        operations.append(transforms.RandomErasing(p=0.5))
+    return transforms.Compose(operations)
+
+
+def build_evaluation_transform():
+    """Preserve deterministic [0, 255] to [0, 1] preprocessing."""
+    return transforms.Compose(
+        [
+            transforms.ToPILImage(),
+            transforms.ToTensor(),
+        ]
+    )
+
+
+def get_augmentation_config(enabled: bool) -> dict:
+    if not enabled:
+        return {
+            "enabled": False,
+            "training_only": True,
+            "transforms": [],
+        }
+    return {
+        "enabled": True,
+        "training_only": True,
+        "transforms": [
+            {
+                "name": "scaling",
+                "probability": 0.5,
+                "scale": [0.8, 1.2],
+                "parameter_source": "FER2013 paper",
+            },
+            {
+                "name": "translation",
+                "probability": 0.5,
+                "horizontal_fraction": [-0.2, 0.2],
+                "vertical_fraction": [-0.2, 0.2],
+                "parameter_source": "FER2013 paper",
+            },
+            {
+                "name": "rotation",
+                "probability": 0.5,
+                "degrees": [-10, 10],
+                "parameter_source": "FER2013 paper",
+            },
+            {
+                "name": "random_erasing",
+                "probability": 0.5,
+                "scale": [0.02, 0.33],
+                "ratio": [0.3, 3.3],
+                "value": 0,
+                "probability_source": "FER2013 paper",
+                "other_parameter_source": "torchvision defaults",
+            },
+        ],
+    }
+
+
 class FERDataset(Dataset):
     class_names = (
         "Angry",
@@ -60,9 +145,10 @@ class FERDataset(Dataset):
         "Neutral",
     )
 
-    def __init__(self, csv_file, split="Training"):
+    def __init__(self, csv_file, split="Training", transform=None):
         df = pd.read_csv(csv_file)
         self.df = df[df["Usage"] == split].reset_index(drop=True)
+        self.transform = transform
 
     def __len__(self):
         return len(self.df)
@@ -72,10 +158,11 @@ class FERDataset(Dataset):
 
         label = int(row["emotion"])
 
-        pixels = row["pixels"].split()
-        pixels = np.array(pixels, dtype=np.float32).reshape(48, 48) / 255.0
-
-        img = torch.tensor(pixels).unsqueeze(0)
+        pixels = np.array(row["pixels"].split(), dtype=np.uint8).reshape(48, 48)
+        if self.transform is None:
+            img = torch.from_numpy(pixels).unsqueeze(0).float() / 255.0
+        else:
+            img = self.transform(pixels)
 
         return img, label
 
@@ -414,7 +501,25 @@ if __name__ == "__main__":
         default="",
         help="Short description of the change being tested",
     )
+    parser.add_argument(
+        "--augment",
+        action="store_true",
+        help="Apply FER2013-inspired augmentation to training images only",
+    )
+    parser.add_argument(
+        "--early-stopping",
+        action="store_true",
+        help="Stop after 5 epochs without lower validation loss",
+    )
     args = parser.parse_args()
+
+    if args.early_stopping:
+        if args.model != "vgg_v2":
+            parser.error("V4 early stopping requires --model vgg_v2.")
+        if not args.augment:
+            parser.error("V4 early stopping requires the unchanged --augment pipeline.")
+        if args.epochs != 30:
+            parser.error("V4 early stopping requires --epochs 30.")
 
     device = get_device()
     root = Path(".")
@@ -436,19 +541,37 @@ if __name__ == "__main__":
                 "training_shuffle": True,
                 "training_split": "Training",
                 "validation_split": "PublicTest",
+                "checkpoint_monitor": (
+                    "validation_loss"
+                    if args.early_stopping
+                    else "validation_accuracy"
+                ),
+                "early_stopping": {
+                    "enabled": args.early_stopping,
+                    "patience": 5 if args.early_stopping else None,
+                    "mode": "min" if args.early_stopping else None,
+                    "strict_improvement": args.early_stopping,
+                },
             },
-            "augmentation": {
-                "enabled": False,
-                "transforms": [],
-            },
+            "augmentation": get_augmentation_config(args.augment),
             "description": args.description,
             "migration": None,
         },
         root,
     )
 
-    train_dataset = FERDataset("data/fer2013.csv", split="Training")
-    val_dataset = FERDataset("data/fer2013.csv", split="PublicTest")
+    train_transform = build_training_transform(augmentation=args.augment)
+    evaluation_transform = build_evaluation_transform()
+    train_dataset = FERDataset(
+        "data/fer2013.csv",
+        split="Training",
+        transform=train_transform,
+    )
+    val_dataset = FERDataset(
+        "data/fer2013.csv",
+        split="PublicTest",
+        transform=evaluation_transform,
+    )
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
@@ -458,6 +581,10 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     best_val_accuracy = 0.0
+    best_val_loss = float("inf")
+    best_checkpoint_epoch = None
+    epochs_without_improvement = 0
+    early_stopping_patience = 5
     best_y_true = None
     best_y_pred = None
     train_losses = []
@@ -466,7 +593,7 @@ if __name__ == "__main__":
 
     print(
         f"Training experiment={args.experiment}, model={args.model} on {device}; "
-        f"saving to {out_dir}/"
+        f"augmentation={args.augment}; saving to {out_dir}/"
     )
 
     for epoch in range(args.epochs):
@@ -478,31 +605,80 @@ if __name__ == "__main__":
         val_losses.append(val_loss)
         val_accuracies.append(val_accuracy)
 
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
+        val_loss_improved = val_loss < best_val_loss
+        if val_loss_improved:
+            best_val_loss = val_loss
+
+        if args.early_stopping and val_loss_improved:
+            best_checkpoint_epoch = epoch + 1
+            epochs_without_improvement = 0
             best_y_true = y_true
             best_y_pred = y_pred
             torch.save(model.state_dict(), out_dir / CHECKPOINT_FILENAME)
+        elif args.early_stopping:
+            epochs_without_improvement += 1
+        elif val_accuracy > best_val_accuracy:
+            best_checkpoint_epoch = epoch + 1
+            best_y_true = y_true
+            best_y_pred = y_pred
+            torch.save(model.state_dict(), out_dir / CHECKPOINT_FILENAME)
+
+        best_val_accuracy = max(best_val_accuracy, val_accuracy)
 
         print(
             f"Epoch {epoch + 1}, Train Loss: {train_loss:.4f}, "
             f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
         )
 
+        if (
+            args.early_stopping
+            and epochs_without_improvement >= early_stopping_patience
+        ):
+            print(
+                f"Early stopping at epoch {epoch + 1}: validation loss did not "
+                f"improve for {early_stopping_patience} consecutive epochs."
+            )
+            break
+
+    stopped_epoch = len(train_losses)
+    early_stopped = args.early_stopping and stopped_epoch < args.epochs
+
     print(f"Best Val Accuracy: {best_val_accuracy:.4f}")
+    print(
+        f"Best Val Loss: {best_val_loss:.4f} "
+        f"(checkpoint epoch {best_checkpoint_epoch})"
+    )
+    print(f"Training stopped at epoch: {stopped_epoch}")
+
+    if args.early_stopping:
+        model.load_state_dict(
+            torch.load(out_dir / CHECKPOINT_FILENAME, map_location=device)
+        )
+        model.eval()
 
     np.save(out_dir / TRUE_LABELS_FILENAME, np.array(best_y_true))
     np.save(out_dir / PREDICTIONS_FILENAME, np.array(best_y_pred))
     save_experiment_history(
         args.experiment,
         {
+            "epoch": list(range(1, stopped_epoch + 1)),
             "train_loss": train_losses,
             "validation_loss": val_losses,
             "train_accuracy": None,
             "validation_accuracy": val_accuracies,
             "best_validation_accuracy": best_val_accuracy,
             "best_epoch": int(np.argmax(val_accuracies)) + 1,
-            "test_accuracy": None,
+            "best_validation_loss": best_val_loss,
+            "best_validation_loss_epoch": int(np.argmin(val_losses)) + 1,
+            "best_checkpoint_epoch": best_checkpoint_epoch,
+            "best_checkpoint_validation_accuracy": (
+                val_accuracies[best_checkpoint_epoch - 1]
+            ),
+            "stopped_epoch": stopped_epoch,
+            "early_stopping_patience": (
+                early_stopping_patience if args.early_stopping else None
+            ),
+            "early_stopped": early_stopped,
         },
         root,
     )

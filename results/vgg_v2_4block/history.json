@@ -37,6 +37,5 @@
     0.6185567010309279
   ],
   "best_validation_accuracy": 0.6246865422123155,
-  "best_epoch": 8,
-  "test_accuracy": null
+  "best_epoch": 8
 }
