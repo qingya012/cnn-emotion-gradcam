@@ -1,0 +1,22 @@
+{
+  "experiment": "vgg_v1_batchnorm",
+  "model": "vgg_v1",
+  "architecture": "VGGStyleCNNV1",
+  "optimizer": "Adam",
+  "learning_rate": 0.001,
+  "batch_size": 64,
+  "epochs": 10,
+  "model_options": {},
+  "training_options": {
+    "loss": "CrossEntropyLoss",
+    "training_shuffle": true,
+    "training_split": "Training",
+    "validation_split": "PublicTest"
+  },
+  "augmentation": {
+    "enabled": false,
+    "transforms": []
+  },
+  "description": "VGG baseline with BatchNorm after every convolution",
+  "migration": null
+}

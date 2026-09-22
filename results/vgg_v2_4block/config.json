@@ -1,0 +1,22 @@
+{
+  "experiment": "vgg_v2_4block",
+  "model": "vgg_v2",
+  "architecture": "VGGStyleCNNV2",
+  "optimizer": "Adam",
+  "learning_rate": 0.001,
+  "batch_size": 64,
+  "epochs": 10,
+  "model_options": {},
+  "training_options": {
+    "loss": "CrossEntropyLoss",
+    "training_shuffle": true,
+    "training_split": "Training",
+    "validation_split": "PublicTest"
+  },
+  "augmentation": {
+    "enabled": false,
+    "transforms": []
+  },
+  "description": "VGG baseline with a 4th convolutional block.",
+  "migration": null
+}
