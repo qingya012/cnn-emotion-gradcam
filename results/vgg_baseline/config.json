@@ -1,0 +1,21 @@
+{
+  "experiment": "vgg_baseline",
+  "model": "vgg",
+  "architecture": "VGGStyleCNN",
+  "optimizer": null,
+  "learning_rate": null,
+  "batch_size": null,
+  "epochs": 10,
+  "model_options": null,
+  "training_options": {
+    "training_split": "Training",
+    "validation_split": "PublicTest"
+  },
+  "augmentation": null,
+  "description": "Deeper 6-convolution VGG-style baseline testing increased depth alone.",
+  "migration": {
+    "source": "results/vgg",
+    "checkpoint_sha256": "206213f2c8042d9bfd598d6525b9c74103d4fb0e310444ac2bbc0c18ef60e602",
+    "note": "Migrated from legacy NumPy artifacts. Historical optimizer, learning rate, batch size, model options, and augmentation metadata were not saved and are intentionally null."
+  }
+}

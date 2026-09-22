@@ -1,3 +1,32 @@
+"""Train, save, and load CNN experiments for the FER2013 dataset.
+
+This module contains the FER2013 dataset adapter, the ``SimpleCNN`` and
+``VGGStyleCNN`` architectures, their shared ``MODELS`` registry, training and
+validation loops, and helpers used by the exploration notebook. Importing the
+module only defines these components; training starts only when this file is
+run as a script.
+
+Architecture and experiment are intentionally separate concepts:
+
+* ``--model`` chooses the neural-network architecture from ``MODELS``.
+* ``--experiment`` gives one training run a unique name. Its artifacts are
+  written to ``results/<experiment>/``.
+
+For example:
+
+``python src/main.py --experiment simple_run_2 --model simple --description "Repeat baseline"``
+
+The command and its options mean:
+
+* ``python src/main.py`` runs the training entry point in this file.
+* ``--experiment simple_run_2`` names the run and its results directory.
+* ``--model simple`` selects ``SimpleCNN``; use ``vgg`` for ``VGGStyleCNN``.
+* ``--description "..."`` records a human-readable explanation in
+  ``config.json`` and the notebook summary. It does not alter training.
+* ``--epochs``, ``--batch-size``, and ``--lr`` optionally override their
+  defaults of 10, 64, and 0.001.
+"""
+
 import argparse
 from pathlib import Path
 
@@ -7,6 +36,18 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.optim as optim
+
+from experiments import (
+    CHECKPOINT_FILENAME,
+    PREDICTIONS_FILENAME,
+    TRUE_LABELS_FILENAME,
+    get_experiment_dir,
+    load_config,
+    load_history as load_experiment_history,
+    load_predictions as load_experiment_predictions,
+    save_config,
+    save_history as save_experiment_history,
+)
 
 
 class FERDataset(Dataset):
@@ -124,10 +165,8 @@ MODELS = {
 }
 
 
-def get_results_dir(model_name: str, root: str | Path = ".") -> Path:
-    if model_name not in MODELS:
-        raise ValueError(f"Unknown model {model_name!r}. Choose from: {list(MODELS)}")
-    return Path(root) / "results" / model_name
+def get_results_dir(experiment: str, root: str | Path = ".") -> Path:
+    return get_experiment_dir(experiment, root)
 
 
 def build_model(model_name: str) -> nn.Module:
@@ -142,32 +181,12 @@ def get_gradcam_layer(model: nn.Module, model_name: str) -> nn.Module:
     return model.features[MODELS[model_name]["gradcam_layer_index"]]
 
 
-def load_history(model_name: str, root: str | Path = "."):
-    results = get_results_dir(model_name, root)
-    required = ("train_losses.npy", "val_losses.npy", "val_accuracies.npy")
-    missing = [name for name in required if not (results / name).exists()]
-    if missing:
-        raise FileNotFoundError(
-            f"Missing {missing} under {results}. Train with:\n"
-            f"  python src/main.py --model {model_name}"
-        )
-    return {
-        "train_losses": np.load(results / "train_losses.npy"),
-        "val_losses": np.load(results / "val_losses.npy"),
-        "val_accuracies": np.load(results / "val_accuracies.npy"),
-    }
+def load_history(experiment: str, root: str | Path = "."):
+    return load_experiment_history(experiment, root)
 
 
-def load_predictions(model_name: str, root: str | Path = "."):
-    results = get_results_dir(model_name, root)
-    y_true_path = results / "best_y_true.npy"
-    y_pred_path = results / "best_y_pred.npy"
-    if not y_true_path.exists() or not y_pred_path.exists():
-        raise FileNotFoundError(
-            f"Missing prediction files under {results}. Train with:\n"
-            f"  python src/main.py --model {model_name}"
-        )
-    return np.load(y_true_path), np.load(y_pred_path)
+def load_predictions(experiment: str, root: str | Path = "."):
+    return load_experiment_predictions(experiment, root)
 
 
 def get_device() -> torch.device:
@@ -179,13 +198,15 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def load_trained_model(model_name: str, device, root: str | Path = "."):
-    results = get_results_dir(model_name, root)
-    checkpoint = results / "best_model.pth"
+def load_trained_model(experiment: str, device, root: str | Path = "."):
+    config = load_config(experiment, root)
+    model_name = config["model"]
+    results = get_results_dir(experiment, root)
+    checkpoint = results / CHECKPOINT_FILENAME
     if not checkpoint.exists():
         raise FileNotFoundError(
             f"{checkpoint} not found. Train with:\n"
-            f"  python src/main.py --model {model_name}"
+            f"  python src/main.py --experiment {experiment} --model {model_name}"
         )
     model = build_model(model_name)
     model.load_state_dict(torch.load(checkpoint, map_location=device))
@@ -261,20 +282,56 @@ def get_predictions(model, loader, device):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train FER emotion CNN")
     parser.add_argument(
+        "--experiment",
+        required=True,
+        help="Unique run name (results saved under results/<experiment>/)",
+    )
+    parser.add_argument(
         "--model",
         choices=list(MODELS),
         default="simple",
-        help="Architecture to train (results saved under results/<model>/)",
+        help="Architecture to train",
     )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument(
+        "--description",
+        default="",
+        help="Short description of the change being tested",
+    )
     args = parser.parse_args()
 
     device = get_device()
     root = Path(".")
-    out_dir = get_results_dir(args.model, root)
+    out_dir = get_results_dir(args.experiment, root)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    save_config(
+        {
+            "experiment": args.experiment,
+            "model": args.model,
+            "architecture": MODELS[args.model]["class"].__name__,
+            "optimizer": "Adam",
+            "learning_rate": args.lr,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "model_options": {},
+            "training_options": {
+                "loss": "CrossEntropyLoss",
+                "training_shuffle": True,
+                "training_split": "Training",
+                "validation_split": "PublicTest",
+            },
+            "augmentation": {
+                "enabled": False,
+                "transforms": [],
+            },
+            "description": args.description,
+            "migration": None,
+        },
+        root,
+    )
 
     train_dataset = FERDataset("data/fer2013.csv", split="Training")
     val_dataset = FERDataset("data/fer2013.csv", split="PublicTest")
@@ -293,7 +350,10 @@ if __name__ == "__main__":
     val_losses = []
     val_accuracies = []
 
-    print(f"Training model={args.model} on {device}; saving to {out_dir}/")
+    print(
+        f"Training experiment={args.experiment}, model={args.model} on {device}; "
+        f"saving to {out_dir}/"
+    )
 
     for epoch in range(args.epochs):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
@@ -308,7 +368,7 @@ if __name__ == "__main__":
             best_val_accuracy = val_accuracy
             best_y_true = y_true
             best_y_pred = y_pred
-            torch.save(model.state_dict(), out_dir / "best_model.pth")
+            torch.save(model.state_dict(), out_dir / CHECKPOINT_FILENAME)
 
         print(
             f"Epoch {epoch + 1}, Train Loss: {train_loss:.4f}, "
@@ -317,8 +377,18 @@ if __name__ == "__main__":
 
     print(f"Best Val Accuracy: {best_val_accuracy:.4f}")
 
-    np.save(out_dir / "best_y_true.npy", np.array(best_y_true))
-    np.save(out_dir / "best_y_pred.npy", np.array(best_y_pred))
-    np.save(out_dir / "train_losses.npy", np.array(train_losses))
-    np.save(out_dir / "val_losses.npy", np.array(val_losses))
-    np.save(out_dir / "val_accuracies.npy", np.array(val_accuracies))
+    np.save(out_dir / TRUE_LABELS_FILENAME, np.array(best_y_true))
+    np.save(out_dir / PREDICTIONS_FILENAME, np.array(best_y_pred))
+    save_experiment_history(
+        args.experiment,
+        {
+            "train_loss": train_losses,
+            "validation_loss": val_losses,
+            "train_accuracy": None,
+            "validation_accuracy": val_accuracies,
+            "best_validation_accuracy": best_val_accuracy,
+            "best_epoch": int(np.argmax(val_accuracies)) + 1,
+            "test_accuracy": None,
+        },
+        root,
+    )
