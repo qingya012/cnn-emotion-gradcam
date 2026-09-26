@@ -26,8 +26,10 @@ The command and its options mean:
   defaults of 10, 64, and 0.001.
 * ``--augment`` enables the FER2013-inspired training-only augmentation
   pipeline; validation preprocessing remains deterministic.
-* ``--early-stopping`` enables the V4 protocol: 30 maximum epochs, patience
-  5 on validation loss, and reloading the best validation-loss checkpoint.
+* ``--early-stopping`` enables validation-loss early stopping and reloads the
+  best validation-loss checkpoint after training.
+* ``--lr-scheduler`` extends that protocol for V5 with validation-loss LR
+  reduction and early-stopping patience 10.
 """
 
 import argparse
@@ -509,17 +511,27 @@ if __name__ == "__main__":
     parser.add_argument(
         "--early-stopping",
         action="store_true",
-        help="Stop after 5 epochs without lower validation loss",
+        help="Stop on validation-loss plateau (patience 5, or 10 with scheduler)",
+    )
+    parser.add_argument(
+        "--lr-scheduler",
+        action="store_true",
+        help="Reduce LR by 10x after validation loss plateaus for 5 epochs",
     )
     args = parser.parse_args()
 
+    if args.lr_scheduler and not args.early_stopping:
+        parser.error("V5 LR scheduling requires --early-stopping.")
+
     if args.early_stopping:
         if args.model != "vgg_v2":
-            parser.error("V4 early stopping requires --model vgg_v2.")
+            parser.error("Extended training requires --model vgg_v2.")
         if not args.augment:
-            parser.error("V4 early stopping requires the unchanged --augment pipeline.")
-        if args.epochs != 30:
-            parser.error("V4 early stopping requires --epochs 30.")
+            parser.error(
+                "Extended training requires the unchanged --augment pipeline."
+            )
+
+    early_stopping_patience = 10 if args.lr_scheduler else 5
 
     device = get_device()
     root = Path(".")
@@ -548,9 +560,21 @@ if __name__ == "__main__":
                 ),
                 "early_stopping": {
                     "enabled": args.early_stopping,
-                    "patience": 5 if args.early_stopping else None,
+                    "patience": (
+                        early_stopping_patience if args.early_stopping else None
+                    ),
                     "mode": "min" if args.early_stopping else None,
                     "strict_improvement": args.early_stopping,
+                },
+                "lr_scheduler": {
+                    "enabled": args.lr_scheduler,
+                    "name": "ValidationLossPlateau" if args.lr_scheduler else None,
+                    "monitor": "validation_loss" if args.lr_scheduler else None,
+                    "mode": "min" if args.lr_scheduler else None,
+                    "factor": 0.1 if args.lr_scheduler else None,
+                    "patience": 5 if args.lr_scheduler else None,
+                    "threshold": 0.0 if args.lr_scheduler else None,
+                    "threshold_mode": "abs" if args.lr_scheduler else None,
                 },
             },
             "augmentation": get_augmentation_config(args.augment),
@@ -584,12 +608,19 @@ if __name__ == "__main__":
     best_val_loss = float("inf")
     best_checkpoint_epoch = None
     epochs_without_improvement = 0
-    early_stopping_patience = 5
+    # ReduceLROnPlateau reduces after bad_epochs > patience; this explicit
+    # counter implements the requested reduction after exactly 5 bad epochs.
+    scheduler_best_val_loss = float("inf")
+    scheduler_epochs_without_improvement = 0
+    scheduler_patience = 5
+    scheduler_factor = 0.1
     best_y_true = None
     best_y_pred = None
     train_losses = []
     val_losses = []
     val_accuracies = []
+    learning_rates = []
+    lr_reduction_epochs = []
 
     print(
         f"Training experiment={args.experiment}, model={args.model} on {device}; "
@@ -597,6 +628,7 @@ if __name__ == "__main__":
     )
 
     for epoch in range(args.epochs):
+        learning_rates.append(optimizer.param_groups[0]["lr"])
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
         val_loss, val_accuracy = evaluate(model, val_loader, criterion, device)
         y_pred, y_true = get_predictions(model, val_loader, device)
@@ -629,6 +661,25 @@ if __name__ == "__main__":
             f"Epoch {epoch + 1}, Train Loss: {train_loss:.4f}, "
             f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
         )
+
+        if args.lr_scheduler:
+            if val_loss < scheduler_best_val_loss:
+                scheduler_best_val_loss = val_loss
+                scheduler_epochs_without_improvement = 0
+            else:
+                scheduler_epochs_without_improvement += 1
+
+            if scheduler_epochs_without_improvement >= scheduler_patience:
+                previous_lr = optimizer.param_groups[0]["lr"]
+                for parameter_group in optimizer.param_groups:
+                    parameter_group["lr"] *= scheduler_factor
+                new_lr = optimizer.param_groups[0]["lr"]
+                scheduler_epochs_without_improvement = 0
+                lr_reduction_epochs.append(epoch + 1)
+                print(
+                    f"LR reduction at epoch {epoch + 1}: "
+                    f"{previous_lr:.6g} -> {new_lr:.6g}"
+                )
 
         if (
             args.early_stopping
@@ -666,6 +717,8 @@ if __name__ == "__main__":
             "validation_loss": val_losses,
             "train_accuracy": None,
             "validation_accuracy": val_accuracies,
+            "learning_rate": learning_rates,
+            "lr_reduction_epochs": lr_reduction_epochs,
             "best_validation_accuracy": best_val_accuracy,
             "best_epoch": int(np.argmax(val_accuracies)) + 1,
             "best_validation_loss": best_val_loss,
@@ -679,6 +732,7 @@ if __name__ == "__main__":
                 early_stopping_patience if args.early_stopping else None
             ),
             "early_stopped": early_stopped,
+            "early_stopping_epoch": stopped_epoch if early_stopped else None,
         },
         root,
     )

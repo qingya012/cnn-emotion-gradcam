@@ -1,0 +1,12 @@
+{
+  "selected_experiment": "vgg_v6_extended_lr_scheduler",
+  "selected_model": "VGGStyleCNNV2",
+  "checkpoint": "results/vgg_v6_extended_lr_scheduler/model.pth",
+  "checkpoint_sha256": "5070878c53f36663895434fa0fd5ceaf26409228734426d1de72cdcec049f12c",
+  "checkpoint_selection": "minimum validation loss",
+  "checkpoint_epoch": 21,
+  "best_validation_loss": 0.9452106717385744,
+  "private_test_samples": 3589,
+  "private_test_loss": 0.9235843033121344,
+  "private_test_accuracy": 0.673725271663416
+}

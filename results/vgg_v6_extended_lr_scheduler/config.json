@@ -1,0 +1,87 @@
+{
+  "experiment": "vgg_v6_extended_lr_scheduler",
+  "model": "vgg_v2",
+  "architecture": "VGGStyleCNNV2",
+  "optimizer": "Adam",
+  "learning_rate": 0.001,
+  "batch_size": 64,
+  "epochs": 40,
+  "model_options": {},
+  "training_options": {
+    "loss": "CrossEntropyLoss",
+    "training_shuffle": true,
+    "training_split": "Training",
+    "validation_split": "PublicTest",
+    "checkpoint_monitor": "validation_loss",
+    "early_stopping": {
+      "enabled": true,
+      "patience": 10,
+      "mode": "min",
+      "strict_improvement": true
+    },
+    "lr_scheduler": {
+      "enabled": true,
+      "name": "ValidationLossPlateau",
+      "monitor": "validation_loss",
+      "mode": "min",
+      "factor": 0.1,
+      "patience": 5,
+      "threshold": 0.0,
+      "threshold_mode": "abs"
+    }
+  },
+  "augmentation": {
+    "enabled": true,
+    "training_only": true,
+    "transforms": [
+      {
+        "name": "scaling",
+        "probability": 0.5,
+        "scale": [
+          0.8,
+          1.2
+        ],
+        "parameter_source": "FER2013 paper"
+      },
+      {
+        "name": "translation",
+        "probability": 0.5,
+        "horizontal_fraction": [
+          -0.2,
+          0.2
+        ],
+        "vertical_fraction": [
+          -0.2,
+          0.2
+        ],
+        "parameter_source": "FER2013 paper"
+      },
+      {
+        "name": "rotation",
+        "probability": 0.5,
+        "degrees": [
+          -10,
+          10
+        ],
+        "parameter_source": "FER2013 paper"
+      },
+      {
+        "name": "random_erasing",
+        "probability": 0.5,
+        "scale": [
+          0.02,
+          0.33
+        ],
+        "ratio": [
+          0.3,
+          3.3
+        ],
+        "value": 0,
+        "probability_source": "FER2013 paper",
+        "other_parameter_source": "torchvision defaults"
+      }
+    ]
+  },
+  "description": "V5 learning-rate scheduling with extended training",
+  "migration": null
+}
