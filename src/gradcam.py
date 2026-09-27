@@ -179,6 +179,8 @@ class GradCAM:
         predicted_label,
         true_label,
         alpha=0.4,
+        axes=None,
+        original_title="Original image",
     ):
         """Show predicted-class and ground-truth-class CAM overlays."""
         image_2d = self._as_2d_array(image, "image")
@@ -187,9 +189,16 @@ class GradCAM:
         self.overlay_heatmap(image_2d, predicted_cam, plot=False)
         self.overlay_heatmap(image_2d, true_cam, plot=False)
 
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        created_figure = axes is None
+        if created_figure:
+            fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        else:
+            if len(axes) != 3:
+                raise ValueError("Comparison visualization requires exactly 3 axes.")
+            fig = axes[0].figure
+
         axes[0].imshow(image_2d, cmap="gray")
-        axes[0].set_title("Original image")
+        axes[0].set_title(original_title)
 
         axes[1].imshow(image_2d, cmap="gray")
         axes[1].imshow(predicted_cam, cmap="jet", alpha=alpha, vmin=0, vmax=1)
@@ -201,7 +210,8 @@ class GradCAM:
 
         for axis in axes:
             axis.axis("off")
-        fig.tight_layout()
+        if created_figure:
+            fig.tight_layout()
         return fig, axes
 
     def print_diagnostics(self):
