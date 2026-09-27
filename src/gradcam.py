@@ -4,13 +4,26 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+def find_last_conv2d(model):
+    """Return the name and module of the model's final registered Conv2d."""
+    last_conv = None
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d):
+            last_conv = (name, module)
+    if last_conv is None:
+        raise ValueError("The model does not contain a torch.nn.Conv2d layer.")
+    return last_conv
+
+
 class GradCAM:
     def __init__(self, model, target_layer):
         self.model = model
         self.target_layer = target_layer
+        self.target_layer_name = self._find_module_name(target_layer)
 
         self.activation = None
         self.gradients = None
+        self.raw_cam = None
         self.diagnostics = {}
 
         self.forward_hook = target_layer.register_forward_hook(self.save_activation)
@@ -26,8 +39,10 @@ class GradCAM:
 
     def generate(self, input_tensor, class_idx=None, print_diagnostics=False):
         self.model.eval()
+        self.model.zero_grad(set_to_none=True)
         self.activation = None
         self.gradients = None
+        self.raw_cam = None
 
         output = self.model(input_tensor)
 
@@ -37,7 +52,12 @@ class GradCAM:
             class_idx = class_idx.item()
         class_idx = int(class_idx)
 
-        self.model.zero_grad(set_to_none=True)
+        if not 0 <= class_idx < output.shape[1]:
+            raise ValueError(
+                f"class_idx must be in [0, {output.shape[1] - 1}], got {class_idx}."
+            )
+
+        # Backpropagate the pre-softmax class score (logit), not a probability.
         score = output[0, class_idx]
         score.backward()
 
@@ -64,9 +84,15 @@ class GradCAM:
         # Average each channel's gradients spatially, then combine the
         # corresponding feature maps into a single H x W map.
         weights = gradients.mean(dim=(1, 2), keepdim=True)
-        cam = (weights * activations).sum(dim=0)
-        cam = F.relu(cam)
+        raw_cam = F.relu((weights * activations).sum(dim=0))
+        self.raw_cam = raw_cam.detach().cpu()
 
+        cam = F.interpolate(
+            raw_cam.unsqueeze(0).unsqueeze(0),
+            size=input_tensor.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )[0, 0]
         cam_min = cam.min()
         cam_max = cam.max()
         if (cam_max - cam_min).item() > 0:
@@ -78,9 +104,13 @@ class GradCAM:
             "model_output_shape": tuple(output.shape),
             "activation_shape": tuple(self.activation.shape),
             "gradient_shape": tuple(self.gradients.shape),
-            "raw_cam_shape": tuple(cam.shape),
-            "resized_cam_shape": None,
+            "raw_cam_shape": tuple(raw_cam.shape),
+            "resized_cam_shape": tuple(cam.shape),
+            "target_class": class_idx,
+            "target_layer": self.target_layer_name,
         }
+
+        self.model.zero_grad(set_to_none=True)
 
         if print_diagnostics:
             self.print_diagnostics()
@@ -91,47 +121,44 @@ class GradCAM:
         image_2d = self._as_2d_array(image, "image")
         heatmap_2d = self._as_2d_array(heatmap, "heatmap")
 
-        # F.interpolate with bilinear mode expects [N, C, H, W].
-        heatmap_tensor = (
-            torch.as_tensor(heatmap_2d, dtype=torch.float32)
-            .unsqueeze(0)
-            .unsqueeze(0)
-        )
-        resized_heatmap = F.interpolate(
-            heatmap_tensor,
-            size=image_2d.shape[-2:],
-            mode="bilinear",
-            align_corners=False,
-        )[0, 0].numpy()
-
-        self.diagnostics["resized_cam_shape"] = tuple(resized_heatmap.shape)
+        if heatmap_2d.shape != image_2d.shape:
+            raise ValueError(
+                "Heatmap and image must have the same spatial shape. "
+                "Use generate() to create an input-sized Grad-CAM, got "
+                f"{heatmap_2d.shape} and {image_2d.shape}."
+            )
 
         if plot:
             if ax is None:
                 _, ax = plt.subplots()
             ax.imshow(image_2d, cmap="gray")
-            ax.imshow(resized_heatmap, cmap="jet", alpha=alpha)
+            ax.imshow(heatmap_2d, cmap="jet", alpha=alpha, vmin=0, vmax=1)
             ax.axis("off")
 
-        return resized_heatmap
+        return heatmap_2d
 
-    def visualize(self, image, heatmap, alpha=0.4, print_diagnostics=True):
+    def visualize(
+        self,
+        image,
+        heatmap,
+        target_label=None,
+        alpha=0.4,
+        print_diagnostics=False,
+    ):
         image_2d = self._as_2d_array(image, "image")
         heatmap_2d = self._as_2d_array(heatmap, "heatmap")
-        resized_heatmap = self.overlay_heatmap(
-            image_2d, heatmap_2d, alpha=alpha, plot=False
-        )
+        self.overlay_heatmap(image_2d, heatmap_2d, alpha=alpha, plot=False)
 
         fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
         axes[0].imshow(image_2d, cmap="gray")
         axes[0].set_title("Original image")
 
-        axes[1].imshow(heatmap_2d, cmap="jet")
-        axes[1].set_title("Raw Grad-CAM")
+        axes[1].imshow(heatmap_2d, cmap="jet", vmin=0, vmax=1)
+        axes[1].set_title(self._gradcam_title(target_label))
 
         axes[2].imshow(image_2d, cmap="gray")
-        axes[2].imshow(resized_heatmap, cmap="jet", alpha=alpha)
+        axes[2].imshow(heatmap_2d, cmap="jet", alpha=alpha, vmin=0, vmax=1)
         axes[2].set_title("Grad-CAM overlay")
 
         for axis in axes:
@@ -142,7 +169,40 @@ class GradCAM:
         if print_diagnostics:
             self.print_diagnostics()
 
-        return fig, axes, resized_heatmap
+        return fig, axes
+
+    def visualize_comparison(
+        self,
+        image,
+        predicted_heatmap,
+        true_heatmap,
+        predicted_label,
+        true_label,
+        alpha=0.4,
+    ):
+        """Show predicted-class and ground-truth-class CAM overlays."""
+        image_2d = self._as_2d_array(image, "image")
+        predicted_cam = self._as_2d_array(predicted_heatmap, "predicted_heatmap")
+        true_cam = self._as_2d_array(true_heatmap, "true_heatmap")
+        self.overlay_heatmap(image_2d, predicted_cam, plot=False)
+        self.overlay_heatmap(image_2d, true_cam, plot=False)
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        axes[0].imshow(image_2d, cmap="gray")
+        axes[0].set_title("Original image")
+
+        axes[1].imshow(image_2d, cmap="gray")
+        axes[1].imshow(predicted_cam, cmap="jet", alpha=alpha, vmin=0, vmax=1)
+        axes[1].set_title(f"Grad-CAM: predicted {predicted_label}")
+
+        axes[2].imshow(image_2d, cmap="gray")
+        axes[2].imshow(true_cam, cmap="jet", alpha=alpha, vmin=0, vmax=1)
+        axes[2].set_title(f"Grad-CAM: true {true_label}")
+
+        for axis in axes:
+            axis.axis("off")
+        fig.tight_layout()
+        return fig, axes
 
     def print_diagnostics(self):
         labels = (
@@ -151,6 +211,8 @@ class GradCAM:
             ("gradient_shape", "Saved gradient shape"),
             ("raw_cam_shape", "Raw CAM shape"),
             ("resized_cam_shape", "Resized CAM shape"),
+            ("target_class", "Target class index"),
+            ("target_layer", "Selected target layer"),
         )
         for key, label in labels:
             print(f"{label}: {self.diagnostics.get(key)}")
@@ -165,6 +227,18 @@ class GradCAM:
                 f"{name} must represent one 2D map, got shape {array.shape}."
             )
         return array
+
+    def _find_module_name(self, target_layer):
+        for name, module in self.model.named_modules():
+            if module is target_layer:
+                return name
+        return f"<explicit {target_layer.__class__.__name__}>"
+
+    @staticmethod
+    def _gradcam_title(target_label):
+        if target_label is None:
+            return "Grad-CAM heatmap"
+        return f"Grad-CAM: {target_label}"
 
     def remove_hooks(self):
         self.forward_hook.remove()
